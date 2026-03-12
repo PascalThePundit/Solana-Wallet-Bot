@@ -1,24 +1,27 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Connection, Keypair, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
+import { FirebaseService } from '../firebase/firebase.service';
+import { Keypair, Connection, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import * as crypto from 'crypto';
 import * as bs58 from 'bs58';
-import { FirebaseService } from '../firebase/firebase.service';
 
 export interface WalletRecord {
   id?: string;
-  chatId: number;
+  chatId: string;
   name: string;
   publicKey: string;
   encryptedPrivateKey: string;
-  createdAt: string;
+  createdAt: number;
 }
+
+const WALLETS_COLLECTION = 'wallets';
+const ALGORITHM = 'aes-256-gcm';
+const IV_LENGTH = 12;
 
 @Injectable()
 export class WalletService {
+  private readonly logger = new Logger(WalletService.name);
   private connection: Connection;
-  private readonly encryptionKey: Buffer;
-  private readonly COLLECTION = 'wallets';
 
   constructor(
     private configService: ConfigService,
@@ -26,73 +29,80 @@ export class WalletService {
   ) {
     const rpcUrl = this.configService.get<string>('solana.rpcUrl');
     this.connection = new Connection(rpcUrl, 'confirmed');
+  }
+
+  private getEncryptionKey(): Buffer {
     const key = this.configService.get<string>('encryption.key');
-    this.encryptionKey = Buffer.from(key, 'utf8');
+    if (!key) throw new Error('ENCRYPTION_KEY is not set');
+    return Buffer.from(key, 'hex');
   }
 
-  private encrypt(text: string): string {
-    const iv = crypto.randomBytes(12);
-    const cipher = crypto.createCipheriv('aes-256-gcm', this.encryptionKey, iv);
-    let ciphertext = cipher.update(text, 'utf8', 'hex');
-    ciphertext += cipher.final('hex');
-    const authTag = cipher.getAuthTag().toString('hex');
-    return `${iv.toString('hex')}:${authTag}:${ciphertext}`;
+  private encrypt(plaintext: string): string {
+    const key = this.getEncryptionKey();
+    const iv = crypto.randomBytes(IV_LENGTH);
+    const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
+    const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+    const authTag = cipher.getAuthTag();
+    return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted.toString('hex')}`;
   }
 
-  private decrypt(encryptedData: string): string {
-    const [ivHex, authTagHex, ciphertextHex] = encryptedData.split(':');
+  private decrypt(ciphertext: string): string {
+    const key = this.getEncryptionKey();
+    const [ivHex, authTagHex, encryptedHex] = ciphertext.split(':');
     const iv = Buffer.from(ivHex, 'hex');
     const authTag = Buffer.from(authTagHex, 'hex');
-    const decipher = crypto.createDecipheriv('aes-256-gcm', this.encryptionKey, iv);
+    const encrypted = Buffer.from(encryptedHex, 'hex');
+    const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
     decipher.setAuthTag(authTag);
-    let decrypted = decipher.update(ciphertextHex, 'hex', 'utf8');
-    decrypted += decipher.final('utf8');
-    return decrypted;
+    return decipher.update(encrypted) + decipher.final('utf8');
   }
 
-  async createWallet(chatId: number, name: string): Promise<WalletRecord> {
+  async createWallet(chatId: string, name: string): Promise<WalletRecord> {
     const keypair = Keypair.generate();
-    const privateKey = bs58.encode(keypair.secretKey);
-    const encryptedPrivateKey = this.encrypt(privateKey);
     const publicKey = keypair.publicKey.toBase58();
+    const privateKeyBase58 = bs58.encode(keypair.secretKey);
+    const encryptedPrivateKey = this.encrypt(privateKeyBase58);
 
-    const walletData: WalletRecord = {
+    const record: WalletRecord = {
       chatId,
       name,
       publicKey,
       encryptedPrivateKey,
-      createdAt: new Date().toISOString(),
+      createdAt: Date.now(),
     };
 
-    const id = await this.firebaseService.addDoc(this.COLLECTION, walletData);
-    return { id, ...walletData };
+    const id = await this.firebaseService.addDoc(WALLETS_COLLECTION, record);
+    this.logger.log(`Wallet created for chatId=${chatId} pubkey=${publicKey}`);
+    return { ...record, id };
   }
 
-  async getWallets(chatId: number): Promise<WalletRecord[]> {
-    return this.firebaseService.queryDocs<WalletRecord>(this.COLLECTION, 'chatId', '==', chatId);
+  async getWallets(chatId: string): Promise<WalletRecord[]> {
+    return this.firebaseService.queryDocs<WalletRecord>(WALLETS_COLLECTION, 'chatId', chatId);
   }
 
-  async getWalletById(id: string): Promise<WalletRecord | null> {
-    return this.firebaseService.getDoc<WalletRecord>(this.COLLECTION, id);
+  async getWalletById(docId: string): Promise<WalletRecord | null> {
+    return this.firebaseService.getDoc<WalletRecord>(WALLETS_COLLECTION, docId);
   }
 
-  async renameWallet(id: string, newName: string): Promise<void> {
-    await this.firebaseService.setDoc(this.COLLECTION, id, { name: newName });
+  async renameWallet(docId: string, newName: string): Promise<void> {
+    await this.firebaseService.setDoc(WALLETS_COLLECTION, docId, { name: newName });
   }
 
-  async removeWallet(id: string): Promise<void> {
-    await this.firebaseService.deleteDoc(this.COLLECTION, id);
+  async removeWallet(docId: string): Promise<void> {
+    await this.firebaseService.deleteDoc(WALLETS_COLLECTION, docId);
   }
 
   getKeypairFromRecord(record: WalletRecord): Keypair {
-    const privateKey = this.decrypt(record.encryptedPrivateKey);
-    const secretKey = bs58.decode(privateKey);
-    return Keypair.fromSecretKey(secretKey);
+    const privateKeyBase58 = this.decrypt(record.encryptedPrivateKey);
+    return Keypair.fromSecretKey(bs58.decode(privateKeyBase58));
   }
 
-  async getSolBalance(publicKeyStr: string): Promise<number> {
-    const publicKey = new PublicKey(publicKeyStr);
-    const balance = await this.connection.getBalance(publicKey);
-    return balance / LAMPORTS_PER_SOL;
+  async getSolBalance(publicKey: string): Promise<number> {
+    const lamports = await this.connection.getBalance(new PublicKey(publicKey));
+    return lamports / LAMPORTS_PER_SOL;
+  }
+
+  getConnection(): Connection {
+    return this.connection;
   }
 }

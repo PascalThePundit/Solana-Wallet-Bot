@@ -1,10 +1,10 @@
 export default () => ({
   telegram: {
-    token: process.env.TELEGRAM_BOT_TOKEN,
+    botToken: process.env.TELEGRAM_BOT_TOKEN,
   },
   solana: {
-    rpcUrl: process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com',
-    network: process.env.SOLANA_NETWORK || 'mainnet-beta',
+    rpcUrl: process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com',
+    network: process.env.SOLANA_NETWORK || 'devnet',
   },
   encryption: {
     key: process.env.ENCRYPTION_KEY,

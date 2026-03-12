@@ -1,9 +1,10 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as admin from 'firebase-admin';
 
 @Injectable()
 export class FirebaseService implements OnModuleInit {
+  private readonly logger = new Logger(FirebaseService.name);
   private firestore: admin.firestore.Firestore;
 
   constructor(private configService: ConfigService) {}
@@ -20,6 +21,7 @@ export class FirebaseService implements OnModuleInit {
       });
     }
     this.firestore = admin.firestore();
+    this.logger.log('Firebase initialized');
   }
 
   async getDoc<T>(collection: string, id: string): Promise<T | null> {
@@ -36,8 +38,8 @@ export class FirebaseService implements OnModuleInit {
     return res.id;
   }
 
-  async queryDocs<T>(collection: string, field: string, operator: any, value: any): Promise<T[]> {
-    const snapshot = await this.firestore.collection(collection).where(field, operator, value).get();
+  async queryDocs<T>(collection: string, field: string, value: any): Promise<T[]> {
+    const snapshot = await this.firestore.collection(collection).where(field, '==', value).get();
     return snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() } as any));
   }
 

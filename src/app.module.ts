@@ -15,7 +15,7 @@ import { TelegramModule } from './telegram/telegram.module';
     TelegrafModule.forRootAsync({
       imports: [ConfigModule],
       useFactory: (configService: ConfigService) => ({
-        token: configService.get<string>('telegram.token'),
+        token: configService.get<string>('telegram.botToken'),
       }),
       inject: [ConfigService],
     }),
