@@ -2,6 +2,7 @@ import { Logger } from '@nestjs/common';
 import { Update, Start, Command, Ctx, On } from 'nestjs-telegraf';
 import { Context, Telegraf } from 'telegraf';
 import { InjectBot } from 'nestjs-telegraf';
+import { ConfigService } from '@nestjs/config';
 import { WalletService } from '../wallet/wallet.service';
 import { PinService } from '../pin/pin.service';
 import {
@@ -21,7 +22,6 @@ type SessionStep =
 interface UserSession {
   step: SessionStep;
   newPin?: string;
-  // for send_sol flow
   walletId?: string;
   toAddress?: string;
   amount?: number;
@@ -35,6 +35,7 @@ export class TelegramUpdate {
   constructor(
     private walletService: WalletService,
     private pinService: PinService,
+    private configService: ConfigService,
     @InjectBot() private bot: Telegraf,
   ) {
     this.registerCommands();
@@ -46,7 +47,7 @@ export class TelegramUpdate {
       { command: 'help', description: 'List all commands' },
       { command: 'create_wallet', description: 'Create a new Solana wallet' },
       { command: 'wallets', description: 'List your wallets' },
-      { command: 'balance', description: 'Check wallet balance' },
+      { command: 'balance', description: 'Check wallet balance (SOL, USDC, USDT)' },
       { command: 'send_sol', description: 'Send SOL to an address' },
       { command: 'rename', description: 'Rename a wallet' },
       { command: 'remove', description: 'Remove a wallet' },
@@ -75,7 +76,7 @@ export class TelegramUpdate {
       `👛 Wallets:\n` +
       `/create_wallet <name> — Create a new wallet\n` +
       `/wallets — List all your wallets\n` +
-      `/balance <wallet_id> — Check SOL balance\n` +
+      `/balance <wallet_id> — Check SOL, USDC & USDT balance\n` +
       `/rename <wallet_id> <new_name> — Rename a wallet\n` +
       `/remove <wallet_id> — Remove a wallet\n\n` +
       `💸 Transactions:\n` +
@@ -103,16 +104,16 @@ export class TelegramUpdate {
     try {
       const wallet = await this.walletService.createWallet(chatId, name);
       await ctx.reply(
-  `✅ Wallet created!\n\n` +
-  `📛 Name: ${wallet.name}\n` +
-  `🔑 Public Key:\n${wallet.publicKey}\n\n` +
-  `🆔 Wallet ID: ${wallet.id}\n\n` +
-  `Save your Wallet ID — you'll need it for transactions.\n\n` +
-  `⚠️ Important Warnings:\n` +
-  `• Transactions cannot be undone\n` +
-  `• If you send to a wrong address, funds are gone forever\n` +
-  `• If you lose your encryption key or PIN, wallets are unrecoverable`,
-);
+        `✅ Wallet created!\n\n` +
+        `📛 Name: ${wallet.name}\n` +
+        `🔑 Public Key:\n${wallet.publicKey}\n\n` +
+        `🆔 Wallet ID: ${wallet.id}\n\n` +
+        `Save your Wallet ID — you'll need it for transactions.\n\n` +
+        `⚠️ Important Warnings:\n` +
+        `• Transactions cannot be undone\n` +
+        `• If you send to a wrong address, funds are gone forever\n` +
+        `• If you lose your encryption key or PIN, wallets are unrecoverable`,
+      );
     } catch (err) {
       this.logger.error('create_wallet error', err);
       await ctx.reply('❌ Something went wrong. Please try again.');
@@ -152,12 +153,20 @@ export class TelegramUpdate {
 
     if (!walletId) return ctx.reply('Usage: /balance <wallet_id>');
 
+    await ctx.reply('⏳ Fetching balances...');
+
     try {
       const wallet = await this.walletService.getWalletById(walletId);
       if (!wallet) return ctx.reply('❌ Wallet not found.');
 
-      const sol = await this.walletService.getSolBalance(wallet.publicKey);
-      await ctx.reply(`💰 Balance for ${wallet.name}\n\nSOL: ${sol.toFixed(6)}`);
+      const balances = await this.walletService.getAllBalances(wallet.publicKey);
+
+      await ctx.reply(
+        `💰 Balances for ${wallet.name}\n\n` +
+        `◎  SOL:  ${balances.sol.toFixed(6)}\n` +
+        `💵 USDC: ${balances.usdc.toFixed(2)}\n` +
+        `💵 USDT: ${balances.usdt.toFixed(2)}`,
+      );
     } catch (err) {
       this.logger.error('balance error', err);
       await ctx.reply('❌ Could not fetch balance. Please try again.');
@@ -221,14 +230,14 @@ export class TelegramUpdate {
       this.sessions.set(chatId, { step: 'awaiting_old_pin' });
       await ctx.reply(
         `🔐 Enter your current PIN to continue:\n\n` +
-        `⚠️ Warning: If you forget your PIN, it cannot be recovered. There is no reset option.`,
+        `⚠️ If you forget your PIN, it cannot be recovered. There is no reset option.`,
       );
     } else {
       this.sessions.set(chatId, { step: 'awaiting_new_pin' });
       await ctx.reply(
         `🔐 Set a new transaction PIN.\n\n` +
         `Enter a PIN (numbers only, min 4 digits):\n\n` +
-        `⚠️ Warning: If you lose or forget your PIN, it cannot be recovered. There is no reset option. Store it somewhere safe.`,
+        `⚠️ If you lose or forget your PIN, it cannot be recovered. There is no reset option. Store it somewhere safe.`,
       );
     }
   }
@@ -258,12 +267,9 @@ export class TelegramUpdate {
 
     const hasPinAlready = await this.pinService.hasPin(chatId);
     if (!hasPinAlready) {
-      return ctx.reply(
-        '❌ You need to set a PIN before sending.\n\nUse /set_pin to create one.',
-      );
+      return ctx.reply('❌ You need to set a PIN before sending.\n\nUse /set_pin to create one.');
     }
 
-    // Store pending transaction in session and ask for PIN
     this.sessions.set(chatId, {
       step: 'awaiting_send_pin',
       walletId,
@@ -271,7 +277,17 @@ export class TelegramUpdate {
       amount,
     });
 
-    await ctx.reply(`🔐 Enter your PIN to confirm sending ${amount} SOL:`);
+    const feeAmount = (amount * 0.01).toFixed(6);
+    const totalAmount = (amount + parseFloat(feeAmount)).toFixed(6);
+
+    await ctx.reply(
+      `🔐 Confirm Transaction\n\n` +
+      `📥 To: ${toAddress}\n` +
+      `💸 Amount: ${amount} SOL\n` +
+      `🏦 Fee: ${feeAmount} SOL (1%)\n` +
+      `💰 Total deducted: ${totalAmount} SOL\n\n` +
+      `Enter your PIN to confirm:`,
+    );
   }
 
   // ── Text handler (handles all multi-step flows) ───────────────────────────────
@@ -337,10 +353,18 @@ export class TelegramUpdate {
         const wallet = await this.walletService.getWalletById(session.walletId);
         if (!wallet) return ctx.reply('❌ Wallet not found.');
 
+        const feeWalletAddress = this.configService.get<string>('fee.walletAddress');
+        const feePercentage = this.configService.get<number>('fee.percentage');
+        const feeLamports = Math.round(session.amount * LAMPORTS_PER_SOL * feePercentage);
+        const amountLamports = Math.round(session.amount * LAMPORTS_PER_SOL);
+        const totalRequired = session.amount + (session.amount * feePercentage);
+
         const balance = await this.walletService.getSolBalance(wallet.publicKey);
-        if (balance < session.amount) {
+        if (balance < totalRequired) {
           return ctx.reply(
-            `❌ Insufficient balance.\n\nAvailable: ${balance.toFixed(6)} SOL\nRequested: ${session.amount} SOL`,
+            `❌ Insufficient balance.\n\n` +
+            `Available: ${balance.toFixed(6)} SOL\n` +
+            `Required: ${totalRequired.toFixed(6)} SOL (includes 1% fee)`,
           );
         }
 
@@ -351,19 +375,26 @@ export class TelegramUpdate {
           SystemProgram.transfer({
             fromPubkey: keypair.publicKey,
             toPubkey: new PublicKey(session.toAddress),
-            lamports: Math.round(session.amount * LAMPORTS_PER_SOL),
+            lamports: amountLamports,
+          }),
+          SystemProgram.transfer({
+            fromPubkey: keypair.publicKey,
+            toPubkey: new PublicKey(feeWalletAddress),
+            lamports: feeLamports,
           }),
         );
 
         const signature = await sendAndConfirmTransaction(connection, transaction, [keypair]);
+        const feeAmount = (session.amount * feePercentage).toFixed(6);
 
         await ctx.reply(
           `✅ Transaction sent!\n\n` +
           `📤 From: ${wallet.name}\n` +
           `📥 To: ${session.toAddress}\n` +
-          `💸 Amount: ${session.amount} SOL\n\n` +
+          `💸 Amount: ${session.amount} SOL\n` +
+          `🏦 Fee: ${feeAmount} SOL (1%)\n\n` +
           `🔗 Signature:\n${signature}\n\n` +
-          `View on explorer:\nhttps://explorer.solana.com/tx/${signature}?cluster=devnet`,
+          `View on explorer:\nhttps://explorer.solana.com/tx/${signature}`,
         );
       } catch (err) {
         this.logger.error('send_sol error', err);

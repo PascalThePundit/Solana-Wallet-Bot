@@ -1,7 +1,17 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { FirebaseService } from '../firebase/firebase.service';
-import { Keypair, Connection, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
+import {
+  Keypair,
+  Connection,
+  PublicKey,
+  LAMPORTS_PER_SOL,
+} from '@solana/web3.js';
+import {
+  getAssociatedTokenAddress,
+  getAccount,
+  TOKEN_PROGRAM_ID,
+} from '@solana/spl-token';
 import * as crypto from 'crypto';
 import * as bs58 from 'bs58';
 
@@ -13,6 +23,16 @@ export interface WalletRecord {
   encryptedPrivateKey: string;
   createdAt: number;
 }
+
+export interface WalletBalances {
+  sol: number;
+  usdc: number;
+  usdt: number;
+}
+
+// Mainnet mint addresses
+const USDC_MINT = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+const USDT_MINT = new PublicKey('Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB');
 
 const WALLETS_COLLECTION = 'wallets';
 const ALGORITHM = 'aes-256-gcm';
@@ -30,6 +50,8 @@ export class WalletService {
     const rpcUrl = this.configService.get<string>('solana.rpcUrl');
     this.connection = new Connection(rpcUrl, 'confirmed');
   }
+
+  // ── Encryption ───────────────────────────────────────────────────────────────
 
   private getEncryptionKey(): Buffer {
     const key = this.configService.get<string>('encryption.key');
@@ -56,6 +78,8 @@ export class WalletService {
     decipher.setAuthTag(authTag);
     return decipher.update(encrypted) + decipher.final('utf8');
   }
+
+  // ── Wallet CRUD ──────────────────────────────────────────────────────────────
 
   async createWallet(chatId: string, name: string): Promise<WalletRecord> {
     const keypair = Keypair.generate();
@@ -97,9 +121,33 @@ export class WalletService {
     return Keypair.fromSecretKey(bs58.decode(privateKeyBase58));
   }
 
+  // ── Balances ─────────────────────────────────────────────────────────────────
+
   async getSolBalance(publicKey: string): Promise<number> {
     const lamports = await this.connection.getBalance(new PublicKey(publicKey));
     return lamports / LAMPORTS_PER_SOL;
+  }
+
+  async getTokenBalance(publicKey: string, mint: PublicKey): Promise<number> {
+    try {
+      const ownerPubkey = new PublicKey(publicKey);
+      const ata = await getAssociatedTokenAddress(mint, ownerPubkey);
+      const account = await getAccount(this.connection, ata);
+      // USDC and USDT both have 6 decimals
+      return Number(account.amount) / 1_000_000;
+    } catch {
+      // Token account doesn't exist = 0 balance
+      return 0;
+    }
+  }
+
+  async getAllBalances(publicKey: string): Promise<WalletBalances> {
+    const [sol, usdc, usdt] = await Promise.all([
+      this.getSolBalance(publicKey),
+      this.getTokenBalance(publicKey, USDC_MINT),
+      this.getTokenBalance(publicKey, USDT_MINT),
+    ]);
+    return { sol, usdc, usdt };
   }
 
   getConnection(): Connection {
