@@ -5,6 +5,7 @@ import configuration from './common/config/configuration';
 import { FirebaseModule } from './firebase/firebase.module';
 import { WalletModule } from './wallet/wallet.module';
 import { TelegramModule } from './telegram/telegram.module';
+import { PinModule } from './pin/pin.module';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { TelegramModule } from './telegram/telegram.module';
     }),
     FirebaseModule,
     WalletModule,
+    PinModule,
     TelegramModule,
   ],
 })
