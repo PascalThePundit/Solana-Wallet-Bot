@@ -2,6 +2,7 @@ import { Logger } from '@nestjs/common';
 import { Update, Start, Command, Ctx, On } from 'nestjs-telegraf';
 import { Context } from 'telegraf';
 import { WalletService } from '../wallet/wallet.service';
+import { Transaction, SystemProgram, PublicKey, LAMPORTS_PER_SOL, sendAndConfirmTransaction } from '@solana/web3.js';
 
 @Update()
 export class TelegramUpdate {
@@ -151,9 +152,74 @@ export class TelegramUpdate {
       await ctx.reply('❌ Could not remove wallet.');
     }
   }
+  @Command('send_sol')
+async onSendSol(@Ctx() ctx: Context) {
+  const text = (ctx.message as any)?.text ?? '';
+  const parts = text.trim().split(/\s+/);
+  const walletId = parts[1];
+  const toAddress = parts[2];
+  const amount = parseFloat(parts[3]);
 
+  // Validate inputs
+  if (!walletId || !toAddress || isNaN(amount) || amount <= 0) {
+    return ctx.reply(
+      '❌ Invalid usage.\n\nUsage: /send_sol <wallet_id> <to_address> <amount>\n\nExample: /send_sol 4dUAPLipa9IdLZ3fAnEe 6n1Dyb3Si... 0.1',
+    );
+  }
+
+  // Validate destination address
+  try {
+    new PublicKey(toAddress);
+  } catch {
+    return ctx.reply('❌ Invalid destination address.');
+  }
+
+  await ctx.reply('⏳ Processing transaction...');
+
+  try {
+    // Fetch sender wallet
+    const wallet = await this.walletService.getWalletById(walletId);
+    if (!wallet) return ctx.reply('❌ Wallet not found.');
+
+    // Check balance
+    const balance = await this.walletService.getSolBalance(wallet.publicKey);
+    if (balance < amount) {
+      return ctx.reply(
+        `❌ Insufficient balance.\n\nAvailable: ${balance.toFixed(6)} SOL\nRequested: ${amount} SOL`,
+      );
+    }
+
+    // Build and send transaction
+    const keypair = this.walletService.getKeypairFromRecord(wallet);
+    const connection = this.walletService.getConnection();
+
+    const transaction = new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: keypair.publicKey,
+        toPubkey: new PublicKey(toAddress),
+        lamports: Math.round(amount * LAMPORTS_PER_SOL),
+      }),
+    );
+
+    const signature = await sendAndConfirmTransaction(connection, transaction, [keypair]);
+
+    await ctx.reply(
+      `✅ Transaction sent!\n\n` +
+      `📤 From: ${wallet.name}\n` +
+      `📥 To: ${toAddress}\n` +
+      `💸 Amount: ${amount} SOL\n\n` +
+      `🔗 Signature:\n${signature}\n\n` +
+      `View on explorer:\nhttps://explorer.solana.com/tx/${signature}?cluster=devnet`,
+    );
+  } catch (err) {
+    this.logger.error('send_sol error', err);
+    await ctx.reply('❌ Transaction failed. Please try again.');
+  }
+}
   @On('text')
   async onText(@Ctx() ctx: Context) {
+    const text = (ctx.message as any)?.text ?? '';
+    if (text.startsWith('/')) return;
     await ctx.reply("I didn't understand that. Type /help to see available commands.");
   }
 }
